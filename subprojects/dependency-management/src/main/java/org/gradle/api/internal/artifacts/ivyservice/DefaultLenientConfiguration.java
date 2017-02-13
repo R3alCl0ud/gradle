@@ -57,6 +57,7 @@ import org.gradle.internal.component.local.model.ComponentFileArtifactIdentifier
 import org.gradle.internal.component.local.model.OpaqueComponentArtifactIdentifier;
 import org.gradle.internal.graph.CachingDirectedGraphWalker;
 import org.gradle.internal.graph.DirectedGraphWithEdgeValues;
+import org.gradle.internal.progress.BuildOperationExecutor;
 import org.gradle.util.CollectionUtils;
 
 import java.io.File;
@@ -78,12 +79,13 @@ public class DefaultLenientConfiguration implements LenientConfiguration, Visite
     private final VisitedFileDependencyResults fileDependencyResults;
     private final TransientConfigurationResultsLoader transientConfigurationResultsFactory;
     private final ArtifactTransforms artifactTransforms;
+    private final BuildOperationExecutor buildOperationExecutor;
 
     // Selected for the configuration
     private final SelectedArtifactResults selectedArtifacts;
     private final SelectedFileDependencyResults selectedFileDependencies;
 
-    public DefaultLenientConfiguration(ConfigurationInternal configuration, CacheLockingManager cacheLockingManager, Set<UnresolvedDependency> unresolvedDependencies, VisitedArtifactsResults artifactResults, VisitedFileDependencyResults fileDependencyResults, TransientConfigurationResultsLoader transientConfigurationResultsLoader, ArtifactTransforms artifactTransforms) {
+    public DefaultLenientConfiguration(ConfigurationInternal configuration, CacheLockingManager cacheLockingManager, Set<UnresolvedDependency> unresolvedDependencies, VisitedArtifactsResults artifactResults, VisitedFileDependencyResults fileDependencyResults, TransientConfigurationResultsLoader transientConfigurationResultsLoader, ArtifactTransforms artifactTransforms, BuildOperationExecutor buildOperationExecutor) {
         this.configuration = configuration;
         this.cacheLockingManager = cacheLockingManager;
         this.unresolvedDependencies = unresolvedDependencies;
@@ -91,6 +93,7 @@ public class DefaultLenientConfiguration implements LenientConfiguration, Visite
         this.fileDependencyResults = fileDependencyResults;
         this.transientConfigurationResultsFactory = transientConfigurationResultsLoader;
         this.artifactTransforms = artifactTransforms;
+        this.buildOperationExecutor = buildOperationExecutor;
         Transformer<ResolvedArtifactSet, Collection<? extends ResolvedVariant>> variantSelector = artifactTransforms.variantSelector(ImmutableAttributes.EMPTY);
         this.selectedArtifacts = artifactResults.select(Specs.<ComponentIdentifier>satisfyAll(), variantSelector);
         this.selectedFileDependencies = fileDependencyResults.select(variantSelector);
@@ -228,11 +231,25 @@ public class DefaultLenientConfiguration implements LenientConfiguration, Visite
     /**
      * Recursive but excludes unsuccessfully resolved artifacts.
      */
-    public Set<File> getFiles(Spec<? super Dependency> dependencySpec) {
-        Set<File> files = Sets.newLinkedHashSet();
-        FilesAndArtifactCollectingVisitor visitor = new FilesAndArtifactCollectingVisitor(files);
-        visitArtifacts(dependencySpec, ImmutableAttributes.EMPTY, selectedArtifacts, selectedFileDependencies, visitor);
-        files.addAll(getFiles(filterUnresolved(visitor.artifacts)));
+    public Set<File> getFiles(final Spec<? super Dependency> dependencySpec) {
+        final Set<ResolvedArtifactResult> artifactResults = Sets.newLinkedHashSet();
+        final Set<File> files = Sets.newLinkedHashSet();
+        final ResolvedArtifactCollectingVisitor visitor = new ResolvedArtifactCollectingVisitor(artifactResults);
+        cacheLockingManager.useCache(new Runnable() {
+            public void run() {
+
+                visitArtifacts(dependencySpec, ImmutableAttributes.EMPTY, selectedArtifacts, selectedFileDependencies, visitor);
+//                files.addAll(visitor.seenFiles);
+                for (ResolvedArtifactResult artifact : artifactResults) {
+                    System.out.println("artifact.getFile() = " + artifact.getFile());
+                    File file = artifact.getFile();
+                    if (file != null) {
+                        files.add(file);
+                    }
+                }
+            }
+        });
+
         return files;
     }
 
@@ -256,21 +273,6 @@ public class DefaultLenientConfiguration implements LenientConfiguration, Visite
                 return CollectionUtils.filter(artifacts, new IgnoreMissingExternalArtifacts());
             }
         });
-    }
-
-    private Set<File> getFiles(final Set<ResolvedArtifact> artifacts) {
-        final Set<File> files = new LinkedHashSet<File>();
-        cacheLockingManager.useCache(new Runnable() {
-            public void run() {
-                for (ResolvedArtifact artifact : artifacts) {
-                    File depFile = artifact.getFile();
-                    if (depFile != null) {
-                        files.add(depFile);
-                    }
-                }
-            }
-        });
-        return files;
     }
 
     /**
@@ -411,24 +413,6 @@ public class DefaultLenientConfiguration implements LenientConfiguration, Visite
             } catch (Throwable t) {
                 failures.add(t);
             }
-        }
-    }
-
-    private static class FilesAndArtifactCollectingVisitor extends ArtifactCollectingVisitor {
-        final Collection<File> files;
-
-        FilesAndArtifactCollectingVisitor(Collection<File> files) {
-            this.files = files;
-        }
-
-        @Override
-        public boolean includeFiles() {
-            return true;
-        }
-
-        @Override
-        public void visitFiles(@Nullable ComponentIdentifier componentIdentifier, AttributeContainer variant, Iterable<File> files) {
-            CollectionUtils.addAll(this.files, files);
         }
     }
 
